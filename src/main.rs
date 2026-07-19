@@ -237,26 +237,67 @@ async fn run_iteration_safe(
         }
     };
 
-    // ── 6. Send (with retry buffer logic) ──────────────────────────
+    // ── 6. Send (fire-and-forget, fully parallel per iteration) ────
     let sender_clone = sender.clone();
     let buffer_clone = retry_buffer.clone();
 
     tokio::spawn(async move {
-        // Flush buffered retries first
-        flush_retry_buffer_safe(&sender_clone, &buffer_clone).await;
+        // Drain the retry buffer into local ownership so we don't hold the lock
+        // while doing I/O. This allows other spawned tasks to proceed in parallel.
+        let pending_retries: Vec<String> = {
+            let mut buf = buffer_clone.lock().await;
+            let drained = buf.drain(..).collect();
+            drained
+        };
 
-        // Send current payload
-        match sender_clone.send(&payload).await {
-            Ok(()) => eprintln!("[auto_ocr_win] Payload sent successfully."),
-            Err(e) => {
-                eprintln!("[auto_ocr_win] Send failed: {}", e);
-                log_error(&format!("Send failed: {}", e));
-                let mut buf = buffer_clone.lock().await;
-                if buf.len() >= MAX_RETRY_BUFFER {
-                    buf.remove(0);
+        // Send all buffered retries in parallel with the current payload.
+        // Each send is independent; failures are re-buffered.
+        let mut send_tasks = Vec::new();
+
+        for retry_payload in pending_retries {
+            let s = sender_clone.clone();
+            let b = buffer_clone.clone();
+            send_tasks.push(tokio::spawn(async move {
+                match s.send(&retry_payload).await {
+                    Ok(()) => eprintln!("[auto_ocr_win] Flushed buffered payload."),
+                    Err(e) => {
+                        eprintln!("[auto_ocr_win] Retry flush failed: {}", e);
+                        log_error(&format!("Retry flush failed: {}", e));
+                        let mut buf = b.lock().await;
+                        if buf.len() >= MAX_RETRY_BUFFER {
+                            buf.remove(0);
+                        }
+                        buf.push(retry_payload);
+                    }
                 }
-                buf.push(payload);
-            }
+            }));
+        }
+
+        // Send current payload in parallel too
+        {
+            let s = sender_clone.clone();
+            let b = buffer_clone.clone();
+            let p = payload;
+            send_tasks.push(tokio::spawn(async move {
+                match s.send(&p).await {
+                    Ok(()) => eprintln!("[auto_ocr_win] Payload sent successfully."),
+                    Err(e) => {
+                        eprintln!("[auto_ocr_win] Send failed: {}", e);
+                        log_error(&format!("Send failed: {}", e));
+                        let mut buf = b.lock().await;
+                        if buf.len() >= MAX_RETRY_BUFFER {
+                            buf.remove(0);
+                        }
+                        buf.push(p);
+                    }
+                }
+            }));
+        }
+
+        // Await all send tasks so we don't drop them prematurely.
+        // Individual failures are already handled inside each task.
+        for task in send_tasks {
+            let _ = task.await;
         }
     });
 }
@@ -296,24 +337,6 @@ impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
         unsafe {
             let _ = windows::Win32::Foundation::CloseHandle(self.handle);
-        }
-    }
-}
-
-/// Flush retry buffer with error handling — never panics.
-async fn flush_retry_buffer_safe(sender: &DataSender, buffer: &Arc<Mutex<Vec<String>>>) {
-    let mut buf = buffer.lock().await;
-    while !buf.is_empty() {
-        let payload = &buf[0];
-        match sender.send(payload).await {
-            Ok(_) => {
-                eprintln!("[auto_ocr_win] Flushed buffered payload.");
-                buf.remove(0);
-            }
-            Err(e) => {
-                eprintln!("[auto_ocr_win] Retry flush failed: {}", e);
-                break;
-            }
         }
     }
 }
