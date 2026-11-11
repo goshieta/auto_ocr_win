@@ -1,6 +1,6 @@
-use std::error::Error;
-use serde::Serialize;
 use reqwest::Client;
+use serde::Serialize;
+use std::error::Error;
 
 use crate::config::Config;
 
@@ -9,6 +9,17 @@ use crate::config::Config;
 struct OcrPayload {
     source: String,
     content: String,
+    /// Host that produced the capture. Optional on the server side, but it
+    /// keeps multi-device data distinguishable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device: Option<String>,
+    /// Client-side timestamp in RFC 3339. The server also records its own
+    /// receive time, so a wrong client clock cannot lose data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_ts: Option<String>,
+    /// Title of the foreground window at capture time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window_title: Option<String>,
 }
 
 /// Format a reqwest error into a human-readable diagnostic string,
@@ -54,10 +65,7 @@ fn format_http_error(error: reqwest::Error, url: &str) -> String {
         source = s.source();
     }
 
-    format!(
-        "[{}] POST {} failed: {}",
-        tags_str, url, chain
-    )
+    format!("[{}] POST {} failed: {}", tags_str, url, chain)
 }
 
 #[derive(Clone)]
@@ -79,15 +87,22 @@ impl DataSender {
         }
     }
 
-    /// Build a JSON payload string from the recognized text.
-    pub fn build_payload(&self, text: &str) -> Result<String, String> {
+    /// Build a JSON payload string from the recognized text and metadata.
+    pub fn build_payload(
+        &self,
+        text: &str,
+        device: Option<&str>,
+        window_title: Option<&str>,
+    ) -> Result<String, String> {
         let payload = OcrPayload {
             source: "ocr".to_string(),
             content: text.to_string(),
+            device: device.map(|value| value.to_string()),
+            client_ts: Some(chrono::Local::now().to_rfc3339()),
+            window_title: window_title.map(|value| value.to_string()),
         };
 
-        serde_json::to_string(&payload)
-            .map_err(|e| format!("JSON serialization failed: {}", e))
+        serde_json::to_string(&payload).map_err(|e| format!("JSON serialization failed: {}", e))
     }
 
     /// Send a JSON payload to the configured server URL via HTTP POST.

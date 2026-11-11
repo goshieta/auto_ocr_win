@@ -1,7 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod config;
 mod capture;
+mod config;
+mod foreground;
 mod ocr;
 mod sender;
 mod startup;
@@ -11,8 +12,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
-use config::Config;
 use capture::ScreenCapture;
+use config::Config;
 use ocr::OcrEngineWrapper;
 use sender::DataSender;
 use startup::register_startup;
@@ -53,13 +54,14 @@ async fn main() {
     };
 
     // ── Startup registration (non-fatal) ────────────────────────────
-    let _ = std::panic::catch_unwind(|| {
-        match register_startup() {
-            Ok(()) => eprintln!("[auto_ocr_win] Startup registration succeeded."),
-            Err(e) => {
-                eprintln!("[auto_ocr_win] Startup registration failed (non-fatal): {}", e);
-                log_error(&format!("Failed to register startup: {}", e));
-            }
+    let _ = std::panic::catch_unwind(|| match register_startup() {
+        Ok(()) => eprintln!("[auto_ocr_win] Startup registration succeeded."),
+        Err(e) => {
+            eprintln!(
+                "[auto_ocr_win] Startup registration failed (non-fatal): {}",
+                e
+            );
+            log_error(&format!("Failed to register startup: {}", e));
         }
     });
 
@@ -79,6 +81,7 @@ async fn main() {
     };
 
     let sender = DataSender::new(&config);
+    let device_name = config.device_name.clone();
 
     // ── Retry buffer ────────────────────────────────────────────────
     let retry_buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -110,6 +113,7 @@ async fn main() {
             &sender,
             &retry_buffer,
             &mut prev_hashes,
+            &device_name,
         )
         .await;
     }
@@ -123,6 +127,7 @@ async fn run_iteration_safe(
     sender: &DataSender,
     retry_buffer: &Arc<Mutex<Vec<String>>>,
     prev_hashes: &mut HashMap<usize, u64>,
+    device_name: &str,
 ) {
     // ── 1. Capture all monitors ─────────────────────────────────────
     let images = match capture.capture_all() {
@@ -228,14 +233,18 @@ async fn run_iteration_safe(
     let combined_text = all_text.join("\n");
 
     // ── 5. Build JSON payload ──────────────────────────────────────
-    let payload = match sender.build_payload(&combined_text) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[auto_ocr_win] Failed to build payload: {}", e);
-            log_error(&format!("Failed to build payload: {}", e));
-            return;
-        }
-    };
+    // The foreground title is sampled once per send. Monitors are aggregated
+    // into one payload, so a single title describes the active window.
+    let window_title = foreground::foreground_window_title();
+    let payload =
+        match sender.build_payload(&combined_text, Some(device_name), window_title.as_deref()) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[auto_ocr_win] Failed to build payload: {}", e);
+                log_error(&format!("Failed to build payload: {}", e));
+                return;
+            }
+        };
 
     // ── 6. Send (fire-and-forget, fully parallel per iteration) ────
     let sender_clone = sender.clone();
@@ -309,9 +318,9 @@ fn compute_hash(data: &[u8]) -> u64 {
 
 /// Ensure only one instance of the application runs at a time.
 fn ensure_single_instance() -> Result<SingleInstanceGuard, String> {
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE};
     use windows::Win32::System::Threading::CreateMutexW;
-    use windows::core::PCWSTR;
 
     let name: Vec<u16> = "Local\\AutoOcrWinService\0".encode_utf16().collect();
 

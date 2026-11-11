@@ -7,6 +7,9 @@ pub struct Config {
     pub server_url: String,
     /// HTTP request timeout in seconds.
     pub request_timeout_secs: u64,
+    /// Device name sent with every payload. `OCR_DEVICE_NAME` overrides the
+    /// `COMPUTERNAME` fallback.
+    pub device_name: String,
 }
 
 impl Config {
@@ -22,12 +25,11 @@ impl Config {
                         .map_err(|e| format!("Failed to load .env from {:?}: {}", env_path, e))?;
                 } else {
                     // Also try the current working directory
-                    let cwd_env = std::env::current_dir()
-                        .unwrap_or_default()
-                        .join(".env");
+                    let cwd_env = std::env::current_dir().unwrap_or_default().join(".env");
                     if cwd_env.exists() {
-                        dotenvy::from_path(&cwd_env)
-                            .map_err(|e| format!("Failed to load .env from {:?}: {}", cwd_env, e))?;
+                        dotenvy::from_path(&cwd_env).map_err(|e| {
+                            format!("Failed to load .env from {:?}: {}", cwd_env, e)
+                        })?;
                     } else {
                         // Try default dotenvy (looks in current dir)
                         let _ = dotenvy::dotenv();
@@ -38,17 +40,25 @@ impl Config {
             let _ = dotenvy::dotenv();
         }
 
-        let server_url = env::var("OCR_SERVER_URL")
-            .map_err(|_| "OCR_SERVER_URL is not set. Please set it in .env file or environment.".to_string())?;
+        let server_url = env::var("OCR_SERVER_URL").map_err(|_| {
+            "OCR_SERVER_URL is not set. Please set it in .env file or environment.".to_string()
+        })?;
 
         let request_timeout_secs = env::var("OCR_REQUEST_TIMEOUT_SECS")
             .unwrap_or_else(|_| "3".to_string())
             .parse::<u64>()
             .unwrap_or(3);
 
+        let device_name = env::var("OCR_DEVICE_NAME")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| env::var("COMPUTERNAME").ok())
+            .unwrap_or_else(|| "windows".to_string());
+
         Ok(Config {
             server_url,
             request_timeout_secs,
+            device_name,
         })
     }
 }

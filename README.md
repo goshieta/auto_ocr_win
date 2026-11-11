@@ -86,6 +86,7 @@ OCR_REQUEST_TIMEOUT_SECS=3
 | -------------------------- | -------- | ---------- | -------------------------------------- |
 | `OCR_SERVER_URL`           | **必須** | —          | OCR結果をPOST送信するエンドポイントURL |
 | `OCR_REQUEST_TIMEOUT_SECS` | 任意     | `3`        | HTTPリクエストのタイムアウト秒数       |
+| `OCR_DEVICE_NAME`          | 任意     | `COMPUTERNAME` | 送信する端末名。未設定なら `COMPUTERNAME`、それも無ければ `windows` |
 
 ### 4. 実行
 
@@ -100,6 +101,23 @@ OCR_REQUEST_TIMEOUT_SECS=3
 - 二重起動チェック
 - スタートアップ自動起動のレジストリ登録（`HKCU\Software\Microsoft\Windows\CurrentVersion\Run\GoshietaOcrService`）
 - 以後5秒間隔で画面キャプチャ→差分検知→OCR→送信のループを開始
+
+## 送信ペイロード
+
+```json
+{
+  "source": "ocr",
+  "content": "...",
+  "device": "goshieta-li",
+  "client_ts": "2026-11-11T12:30:05.123+09:00",
+  "window_title": "Visual Studio Code - pad"
+}
+```
+
+- `device`: `OCR_DEVICE_NAME` → `COMPUTERNAME` の順で解決する
+- `client_ts`: 送信時点のローカル時刻（RFC 3339）
+- `window_title`: `GetForegroundWindow` + `GetWindowTextW` で取得。取得できない場合は省略する
+- 3つとも省略可能。PAD 側は未知フィールドを `meta` に保存し、`window_title` はエピソード分割と機密ウィンドウ判定に使う
 
 ## 処理フロー
 
